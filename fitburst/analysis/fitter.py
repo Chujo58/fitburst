@@ -300,7 +300,8 @@ class LSFitter:
             results = least_squares(
                 self.compute_residuals, 
                 parameter_list,
-                jac = jac
+                jac = jac,
+                workers = -1
             )
 
             self.results = results
