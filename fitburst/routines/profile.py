@@ -12,8 +12,10 @@ and frequency.
 import scipy.special as ss
 import numpy as np
 
-def compute_profile_gaussian(values: float, mean: float, width: float,
-                             normalize: bool = False) -> float:
+
+def compute_profile_gaussian(
+    values: float, mean: float, width: float, normalize: bool = False
+) -> float:
     """
     Computes a one-dimensional Gaussian profile across frequency or time,
     depending on inputs.
@@ -38,19 +40,27 @@ def compute_profile_gaussian(values: float, mean: float, width: float,
         an array containing the normalized Gaussian profile
     """
 
-    norm_factor = 1.
+    norm_factor = 1.0
 
     # if a normalized shape is desired, then apply the width-dependent factor.
     if normalize:
         norm_factor /= np.sqrt(2 * np.pi) / width
 
-    profile = norm_factor * np.exp(-0.5 * ((values - mean) / width)**2)
+    profile = norm_factor * np.exp(-0.5 * ((values - mean) / width) ** 2)
 
     return profile
 
 
-def compute_profile_pbf(time: float, toa: float, width: float, freq: float, ref_freq: float,
-                        sc_time_ref: float, sc_index: float = -4., normalize: bool = False) -> float:
+def compute_profile_pbf(
+    time: float,
+    toa: float,
+    width: float,
+    freq: float,
+    ref_freq: float,
+    sc_time_ref: float,
+    sc_index: float = -4.0,
+    normalize: bool = False,
+) -> float:
     """
     Computes a one-dimensional pulse broadening function (PBF) using the
     analytical solution of a Gaussian profile convolved with a one-side
@@ -89,27 +99,45 @@ def compute_profile_pbf(time: float, toa: float, width: float, freq: float, ref_
     """
     sc_time = sc_time_ref * (freq / ref_freq) ** sc_index
 
-    z = (time - toa) / width
-    ratio = width / sc_time
-    arg1 = (ratio - z) / np.sqrt(2)
+    z = (
+        (time - toa) / width
+    )  # Normally a 1D array with all the times for one frequency and one component. Here a (num_freq, num_time, num_comp) array
+    ratio = (
+        np.tile(np.array(width).reshape(1, len(width)), (len(sc_time), 1))
+        / sc_time[:, None]
+    )
 
-    amp_term = np.sqrt(np.pi / 2) * ratio if normalize else sc_time_ref / sc_time
+    # Expand the ratio to the same shape as the time array:
+    ratio = np.tile(ratio[:, np.newaxis, :], (1, time.shape[1], 1))
 
-    # Create the output array
-    shp = np.broadcast_shapes(freq.shape, time.shape)
-    profile = np.empty(shp, dtype=float)
+    arg1 = (
+        (ratio - z) / np.sqrt(2)
+    )  # Normally a 1D array with all the times for one frequency and one component. Here a (num_freq, num_time, num_comp) array
 
-    # Identify regimes where different calculations are needed to prevent numerical overflow
-    regime1, regime2 = _identify_pbf_regime(arg1)
+    # Calculate the amplitude:
+    amp_term = (
+        np.sqrt(np.pi / 2) * ratio
+        if normalize
+        else np.tile(
+            (sc_time_ref / sc_time).reshape(len(sc_time), 1, 1),
+            (1, time.shape[1], time.shape[2]),
+        )
+    )
 
-    # Calculate the profile in first regime using the scaled complementary error function
-    if regime1 is not None:
-        profile[..., regime1] = amp_term * np.exp(-0.5 * z[..., regime1] ** 2) * ss.erfcx(arg1[..., regime1])
+    profile = np.empty(time.shape, dtype=float)
 
-    # Calculate the profile in second regime using the complementary error function
-    if regime2 is not None:
-        arg2 = (ratio / 2 - z[..., regime2]) * ratio
-        profile[..., regime2] = amp_term * np.exp(arg2) * ss.erfc(arg1[..., regime2])
+    r1, r2 = _identify_pbf_regime(arg1)
+
+    if r1 is not None:
+        if not isinstance(r1, slice):
+            r1 = np.unravel_index(r1, arg1.shape)
+        profile[r1] = amp_term[r1] * np.exp(-0.5 * z[r1] ** 2) * ss.erfcx(arg1[r1])
+
+    if r2 is not None:
+        if not isinstance(r2, slice):
+            r2 = np.unravel_index(r2, arg1.shape)
+        arg2 = (ratio / 2 - z) * ratio
+        profile[r2] = amp_term[r2] * np.exp(arg2[r2]) * ss.erfc(arg1[r2])
 
     return profile
 
@@ -146,15 +174,15 @@ def _identify_pbf_regime(arg: float, threshold=-20.0):
     """
     flag = arg > threshold if arg.ndim == 1 else np.all(arg > threshold, axis=0)
     valid = np.flatnonzero(flag)
-    invalid = np.flatnonzero(~flag) if valid.size < flag.size else None
+    invalid = np.flatnonzero(not flag) if valid.size < flag.size else None
 
     # If possible, convert from indices to slices so that a copy does not occur
     if valid.size == 0:
         valid = None
     elif (valid[-1] + 1 - valid[0]) == valid.size:
-        valid = slice(valid[0], valid[-1]+1)
+        valid = slice(valid[0], valid[-1] + 1)
 
     if invalid is not None and (invalid[-1] + 1 - invalid[0]) == invalid.size:
-        invalid = slice(invalid[0], invalid[-1]+1)
+        invalid = slice(invalid[0], invalid[-1] + 1)
 
     return valid, invalid
