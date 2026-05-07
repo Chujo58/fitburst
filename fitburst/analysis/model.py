@@ -6,11 +6,13 @@ spectra based on parameter values, and handle the updating of one or more
 model parameters. The updating/retrieval methods are used in the fitburst
 fitter object, and are written to handle user-specified fixing of parameters.
 """
+
 import sys
 import numpy as np
 
 from fitburst.backend import general
 import fitburst.routines as rt
+
 
 class SpectrumModeler:
     """
@@ -20,10 +22,19 @@ class SpectrumModeler:
 
     # pylint: disable=too-many-instance-attributes
 
-    def __init__(self, freqs: float, times: float, dm_incoherent: float = 0.,
-        factor_freq_upsample: int = 1, factor_time_upsample: int = 1, num_components: int = 1,
-        is_dedispersed: bool = False, is_folded: bool = False, scintillation: bool = False,
-        verbose: bool = False) -> None:
+    def __init__(
+        self,
+        freqs: float,
+        times: float,
+        dm_incoherent: float = 0.0,
+        factor_freq_upsample: int = 1,
+        factor_time_upsample: int = 1,
+        num_components: int = 1,
+        is_dedispersed: bool = False,
+        is_folded: bool = False,
+        scintillation: bool = False,
+        verbose: bool = False,
+    ) -> None:
         """
         Instantiates the model object and sets relevant parameters, depending on
         desired model for spectral energy distribution.
@@ -93,14 +104,23 @@ class SpectrumModeler:
 
         elif self.times.ndim == 2:
             if self.times.shape[0] != self.num_freq:
-                raise RuntimeError("times array has more than one dimension, "
-                                   "but first dimension does not match frequency axis.")
+                raise RuntimeError(
+                    "times array has more than one dimension, "
+                    "but first dimension does not match frequency axis."
+                )
 
             self.has_freq_dependent_times = True
 
         else:
-            raise RuntimeError("Do not recognize shape of times array. "
-                               "Must be either (ntime,) or (nfreq, ntime).")
+            raise RuntimeError(
+                "Do not recognize shape of times array. "
+                "Must be either (ntime,) or (nfreq, ntime)."
+            )
+
+        if self.has_freq_dependent_times:
+            raise RuntimeError(
+                "The current branch doesn't allow for time dependent time arrays. Please use a 1D `times` array. Thanks!"
+            )
 
         # define all *fittable* model parameters first.
         # NOTE: 'ref_freq' is not listed here as it's a parameter that is always held fixed.
@@ -113,7 +133,7 @@ class SpectrumModeler:
             "scattering_timescale",
             "scattering_index",
             "spectral_index",
-            "spectral_running"
+            "spectral_running",
         ]
 
         # now instantiate parameter attributes and set initially to NoneType.
@@ -160,7 +180,6 @@ class SpectrumModeler:
 
         # loop over all components.
         for current_freq in range(self.num_freq):
-
             if self.has_freq_dependent_times:
                 times = self.times[current_freq]
                 res_time = self.res_time[current_freq]
@@ -170,7 +189,6 @@ class SpectrumModeler:
 
             # now loop over bandpass.
             for current_component in range(self.num_components):
-
                 # extract parameter values for current component.
                 current_amplitude = self.amplitude[current_component]
                 current_arrival_time = self.arrival_time[current_component]
@@ -185,41 +203,43 @@ class SpectrumModeler:
 
                 if self.verbose and current_freq == 0:
                     if self.scintillation:
-                         print(
+                        print(
                             f"{current_dm:.5f} {current_arrival_time:.5f} ",
-                            f"{current_sc_idx:.5f}  {current_sc_time:.5f}  {current_width:.5f}", end=" ")
+                            f"{current_sc_idx:.5f}  {current_sc_time:.5f}  {current_width:.5f}",
+                            end=" ",
+                        )
                     else:
-                         print(
+                        print(
                             f"{current_dm:.5f}  {current_amplitude:.5f}  {current_arrival_time:.5f}  ",
-                            f"{current_sc_idx:.5f}  {current_sc_time:.5f}  {current_width:.5f}", end=" ")
+                            f"{current_sc_idx:.5f}  {current_sc_time:.5f}  {current_width:.5f}",
+                            end=" ",
+                        )
 
                 # create an upsampled version of the current frequency label.
                 # even if no upsampling is desired, this will return an array
                 # of length 1.
                 current_freq_arr = rt.manipulate.upsample_1d(
-                    [self.freqs[current_freq]],
-                    self.res_freq,
-                    self.factor_freq_upsample
+                    [self.freqs[current_freq]], self.res_freq, self.factor_freq_upsample
                 )
 
                 # create an upsampled version of the times label
                 current_times = rt.manipulate.upsample_1d(
-                    times,
-                    res_time,
-                    self.factor_time_upsample
+                    times, res_time, self.factor_time_upsample
                 )
 
                 # first, compute arrival time for all upsampled frequency labels.
-                arrival_time_vs_freq = current_arrival_time + rt.ism.compute_time_dm_delay(
-                    self.dm_incoherent + current_dm,
-                    general["constants"]["dispersion"],
-                    current_dm_index,
-                    current_freq_arr,
-                    freq2=current_ref_freq,
+                arrival_time_vs_freq = (
+                    current_arrival_time
+                    + rt.ism.compute_time_dm_delay(
+                        self.dm_incoherent + current_dm,
+                        general["constants"]["dispersion"],
+                        current_dm_index,
+                        current_freq_arr,
+                        freq2=current_ref_freq,
+                    )
                 )
 
                 if not self.has_freq_dependent_times:
-
                     # if the time axis is shared across all freqs,
                     # incoherent dedispersion has already aligned to
                     # `ref_freq`. Remove that alignment here so the
@@ -236,27 +256,28 @@ class SpectrumModeler:
                 current_times_arr = current_times - arrival_time_vs_freq[:, None]
 
                 # before proceeding, compute and save the per-component time difference map.
-                self.timediff_per_component[current_freq, :, current_component] = \
+                self.timediff_per_component[current_freq, :, current_component] = (
                     rt.manipulate.downsample_1d(
-                        current_times_arr.mean(axis=0),
-                        self.factor_time_upsample
+                        current_times_arr.mean(axis=0), self.factor_time_upsample
                     )
+                )
 
                 # next, compute and store raw temporal profile.
                 current_profile = self.compute_profile(
                     current_times_arr,
-                    0.0, # since 'current_times' is already corrected for DM.
+                    0.0,  # since 'current_times' is already corrected for DM.
                     current_sc_time,
                     current_sc_idx,
                     current_width,
                     current_freq_arr[:, None],
                     current_ref_freq,
-                    is_folded = self.is_folded,
+                    is_folded=self.is_folded,
                 )
 
-                self.timeprof_per_component[current_freq, :, current_component] = rt.manipulate.downsample_1d(
-                    current_profile.mean(axis=0),
-                    self.factor_time_upsample
+                self.timeprof_per_component[current_freq, :, current_component] = (
+                    rt.manipulate.downsample_1d(
+                        current_profile.mean(axis=0), self.factor_time_upsample
+                    )
                 )
 
                 # next, compute and scale profile by the spectral energy distribution.
@@ -269,18 +290,22 @@ class SpectrumModeler:
 
                 # before writing, downsize upsampled array to original size.
                 current_profile = rt.manipulate.downsample_1d(
-                    current_profile.mean(axis=0),
-                    self.factor_time_upsample
+                    current_profile.mean(axis=0), self.factor_time_upsample
                 )
 
                 # before exiting the loop, save different snapshots of the model.
-                self.amplitude_per_component[current_freq, :, current_component] = rt.spectrum.compute_spectrum_rpl(
-                    self.freqs[current_freq],
-                    current_ref_freq,
-                    current_sp_idx,
-                    current_sp_run
-                ) * (10 ** current_amplitude)
-                self.spectrum_per_component[current_freq, :, current_component] = (10 ** current_amplitude) * current_profile
+                self.amplitude_per_component[current_freq, :, current_component] = (
+                    rt.spectrum.compute_spectrum_rpl(
+                        self.freqs[current_freq],
+                        current_ref_freq,
+                        current_sp_idx,
+                        current_sp_run,
+                    )
+                    * (10**current_amplitude)
+                )
+                self.spectrum_per_component[current_freq, :, current_component] = (
+                    10**current_amplitude
+                ) * current_profile
 
                 # print spectral index/running for current component.
                 if current_freq == 0:
@@ -292,7 +317,6 @@ class SpectrumModeler:
 
         # if desired, then compute per-channel amplitudes in cases where scintillation is significant.
         if self.scintillation:
-
             for freq in range(self.num_freq):
                 current_amplitudes = rt.ism.compute_amplitude_per_channel(
                     data[freq], self.timeprof_per_component[freq, :, :]
@@ -300,13 +324,26 @@ class SpectrumModeler:
                 # now compute model with per-channel amplitudes determined.
                 for component in range(self.num_components):
                     current_profile = self.timeprof_per_component[freq, :, component]
-                    self.amplitude_per_component[freq, :, component] = current_amplitudes[component]
-                    self.spectrum_per_component[freq, :, component] = current_amplitudes[component] * current_profile
+                    self.amplitude_per_component[freq, :, component] = (
+                        current_amplitudes[component]
+                    )
+                    self.spectrum_per_component[freq, :, component] = (
+                        current_amplitudes[component] * current_profile
+                    )
 
         return np.sum(self.spectrum_per_component, axis=2)
 
-    def compute_profile(self, times: float, arrival_time: float, sc_time_ref: float, sc_index: float,
-        width: float, freqs: float, ref_freq: float, is_folded: bool = False) -> float:
+    def compute_profile(
+        self,
+        times: float,
+        arrival_time: float,
+        sc_time_ref: float,
+        sc_index: float,
+        width: float,
+        freqs: float,
+        ref_freq: float,
+        is_folded: bool = False,
+    ) -> float:
         """
         Returns the temporal profile, depending on input values of width
         and scattering timescale.
@@ -355,7 +392,9 @@ class SpectrumModeler:
             res_time = np.diff(times_copy, axis=1)[:, 0]
             start = times[:, -1] + res_time
             stop = times[:, -1] + (res_time * times.shape[1])
-            times_extended = np.linspace(start=start, stop=stop, num=times.shape[1], axis=1)
+            times_extended = np.linspace(
+                start=start, stop=stop, num=times.shape[1], axis=1
+            )
             times_copy = np.append(times, times_extended, axis=1)
 
         # compute either Gaussian or pulse-broadening function, depending on inputs.
@@ -364,17 +403,38 @@ class SpectrumModeler:
         normalize = general["flags"]["normalize_pbf"]
 
         if np.any(sc_time > 0.0):
-            times_copy[times_copy < -5 * width] = -5 * width
+            # Setup the masking
+            threshold = (np.array(width) * -5).reshape(1, 1, len(width))
+            mask = times_copy < threshold
+
+            replacement_value = np.tile(
+                (-5 * np.array(width)).reshape(1, 1, (len(width))),
+                (times.shape[0], times.shape[1], 1),
+            )
+
+            times_copy[mask] = replacement_value[mask]
+
             profile = rt.profile.compute_profile_pbf(
-                times_copy, arrival_time, width, freqs, ref_freq, sc_time_ref, sc_index=sc_index, normalize=normalize
+                times_copy,
+                arrival_time,
+                width,
+                freqs,
+                ref_freq,
+                sc_time_ref,
+                sc_index=sc_index,
+                normalize=normalize,
             )
         else:
-            profile = rt.profile.compute_profile_gaussian(times_copy, arrival_time, width)
+            profile = rt.profile.compute_profile_gaussian(
+                times_copy, arrival_time, width
+            )
 
         # if data are folded and time/profile data contain two realizations, then
         # average along the appropriate axis to obtain a single realization.
         if is_folded:
-            profile = profile.reshape(times.shape[0], 2, times.shape[1]).mean(1)
+            profile = profile.reshape(
+                times.shape[0], 2, times.shape[1], times.shape[2]
+            ).mean(axis=1)
 
         return profile
 
@@ -407,7 +467,11 @@ class SpectrumModeler:
 
         return parameter_dict
 
-    def update_parameters(self, model_parameters: dict, global_parameters: list = ["dm", "scattering_timescale"]) -> None:
+    def update_parameters(
+        self,
+        model_parameters: dict,
+        global_parameters: list = ["dm", "scattering_timescale"],
+    ) -> None:
         """
         Overloads parameter values stored in object with those supplied by the user.
 
@@ -433,4 +497,8 @@ class SpectrumModeler:
                 setattr(self, "num_components", num_components)
 
                 if current_parameter in global_parameters:
-                    setattr(self, current_parameter, [model_parameters[current_parameter][0]] * num_components)
+                    setattr(
+                        self,
+                        current_parameter,
+                        [model_parameters[current_parameter][0]] * num_components,
+                    )
