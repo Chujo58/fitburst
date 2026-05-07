@@ -175,21 +175,8 @@ class SpectrumModeler:
         if self.scintillation and data is None:
             sys.exit("ERROR: scintillation modelling is desired by data are missing!")
 
-        # initialize model matrix and size of temporal window.
-        num_window_bins = self.num_time // 2
-
-        # loop over all components.
-        for current_freq in range(self.num_freq):
-            if self.has_freq_dependent_times:
-                times = self.times[current_freq]
-                res_time = self.res_time[current_freq]
-            else:
-                times = self.times
-                res_time = self.res_time
-
-            # now loop over bandpass.
+        if self.verbose:
             for current_component in range(self.num_components):
-                # extract parameter values for current component.
                 current_amplitude = self.amplitude[current_component]
                 current_arrival_time = self.arrival_time[current_component]
                 current_dm = self.dm[0]
@@ -201,135 +188,126 @@ class SpectrumModeler:
                 current_sp_run = self.spectral_running[current_component]
                 current_width = self.burst_width[current_component]
 
-                if self.verbose and current_freq == 0:
-                    if self.scintillation:
-                        print(
-                            f"{current_dm:.5f} {current_arrival_time:.5f} ",
-                            f"{current_sc_idx:.5f}  {current_sc_time:.5f}  {current_width:.5f}",
-                            end=" ",
-                        )
-                    else:
-                        print(
-                            f"{current_dm:.5f}  {current_amplitude:.5f}  {current_arrival_time:.5f}  ",
-                            f"{current_sc_idx:.5f}  {current_sc_time:.5f}  {current_width:.5f}",
-                            end=" ",
-                        )
-
-                # create an upsampled version of the current frequency label.
-                # even if no upsampling is desired, this will return an array
-                # of length 1.
-                current_freq_arr = rt.manipulate.upsample_1d(
-                    [self.freqs[current_freq]], self.res_freq, self.factor_freq_upsample
-                )
-
-                # create an upsampled version of the times label
-                current_times = rt.manipulate.upsample_1d(
-                    times, res_time, self.factor_time_upsample
-                )
-
-                # first, compute arrival time for all upsampled frequency labels.
-                arrival_time_vs_freq = (
-                    current_arrival_time
-                    + rt.ism.compute_time_dm_delay(
-                        self.dm_incoherent + current_dm,
-                        general["constants"]["dispersion"],
-                        current_dm_index,
-                        current_freq_arr,
-                        freq2=current_ref_freq,
+                if self.scintillation:
+                    print(
+                        f"{current_dm:.5f} {current_arrival_time:.5f} ",
+                        f"{current_sc_idx:.5f}  {current_sc_time:.5f}  {current_width:.5f}",
                     )
-                )
-
-                if not self.has_freq_dependent_times:
-                    # if the time axis is shared across all freqs,
-                    # incoherent dedispersion has already aligned to
-                    # `ref_freq`. Remove that alignment here so the
-                    # residual DM term is applied consistently per channel.
-                    arrival_time_vs_freq -= rt.ism.compute_time_dm_delay(
-                        self.dm_incoherent,
-                        general["constants"]["dispersion"],
-                        current_dm_index,
-                        self.freqs[current_freq],
-                        freq2=current_ref_freq,
+                else:
+                    print(
+                        f"{current_dm:.5f}  {current_amplitude:.5f}  {current_arrival_time:.5f}  ",
+                        f"{current_sc_idx:.5f}  {current_sc_time:.5f}  {current_width:.5f} {current_sp_idx:.5f}  {current_sp_run:.5f}",
                     )
 
-                # calculate time relative to the arrival time at each frequency
-                current_times_arr = current_times - arrival_time_vs_freq[:, None]
+        # create an upsampled version of the current frequency label.
+        # even if no upsampling is desired, this will return an array
+        # of length 1.
+        upsampled_frequencies = rt.manipulate.upsample_1d(
+            self.freqs, self.res_freq, self.factor_freq_upsample
+        )
 
-                # before proceeding, compute and save the per-component time difference map.
-                self.timediff_per_component[current_freq, :, current_component] = (
-                    rt.manipulate.downsample_1d(
-                        current_times_arr.mean(axis=0), self.factor_time_upsample
-                    )
+        # first, compute "full" delays for all upsampled frequency labels.
+        dm_delay = rt.ism.compute_time_dm_delay(
+            self.dm_incoherent + self.dm[0],
+            general["constants"]["dispersion"],
+            self.dm_index[0],
+            upsampled_frequencies,
+            self.ref_freq[0],
+        )
+
+        # then compute "relative" delays with respect to central frequency.
+        dm_delay -= np.repeat(
+            rt.ism.compute_time_dm_delay(
+                self.dm_incoherent,
+                general["constants"]["dispersion"],
+                self.dm_index[0],
+                self.freqs,
+                self.ref_freq[0],
+            ),
+            self.factor_freq_upsample,
+        )
+
+        # create a 2D array for each component containing the times and remove the toa.
+        time_dt = self.times.copy()
+        new_time_dt = np.array([time_dt] * self.num_components)
+        toas = np.tile(
+            np.array(self.arrival_time)[:, np.newaxis], (1, time_dt.shape[0])
+        )
+
+        # now compute current-times array corrected for relative delay.
+        upsampled_times = rt.manipulate.upsample_1d(
+            (new_time_dt - toas).T, self.res_time, self.factor_time_upsample
+        )
+
+        # # the meshgrid stuff -> removing the dm delay
+        upsampled_times = upsampled_times[np.newaxis, :, :]
+        # Shape of tile: (num_upsampled_freqs, num_upsampled_times, num_components)
+        tile = np.tile(upsampled_times, (upsampled_frequencies.shape[0], 1, 1))
+        tile -= dm_delay[:, None, None]
+
+        # Save the time difference for each component:
+        self.timediff_per_component = rt.manipulate.downsample_tile(
+            tile, [self.factor_freq_upsample, self.factor_time_upsample, 1]
+        )
+
+        # next, compute and store raw temporal profile.
+        profile = self.compute_profile(
+            tile,
+            0,  # we already remove the ToAs a few lines ago. No need to do it again.
+            self.scattering_timescale[0],
+            self.scattering_index[0],
+            self.burst_width,
+            upsampled_frequencies,
+            self.ref_freq[0],
+            self.is_folded,
+        )
+
+        # Again, save the profile for each component:
+        self.timeprof_per_component = rt.manipulate.downsample_tile(
+            profile, [self.factor_freq_upsample, self.factor_time_upsample, 1]
+        )
+
+        # Compute the spectrum and add it to the profile:
+        profile *= rt.spectrum.compute_spectrum_rpl(
+            upsampled_frequencies,
+            self.ref_freq[0],
+            self.spectral_index,
+            self.spectral_running,
+        )[:, None, :]
+
+        # Downsample the profile for a final time:
+        profile = rt.manipulate.downsample_tile(
+            profile, [self.factor_freq_upsample, self.factor_time_upsample, 1]
+        )
+
+        self.amplitude_per_component = np.tile(
+            (
+                rt.spectrum.compute_spectrum_rpl(
+                    self.freqs,
+                    self.ref_freq[0],
+                    self.spectral_index,
+                    self.spectral_running,
                 )
+                * (10 ** np.array(self.amplitude))
+            )[:, np.newaxis, :],
+            (1, len(self.times), 1),
+        )
 
-                # next, compute and store raw temporal profile.
-                current_profile = self.compute_profile(
-                    current_times_arr,
-                    0.0,  # since 'current_times' is already corrected for DM.
-                    current_sc_time,
-                    current_sc_idx,
-                    current_width,
-                    current_freq_arr[:, None],
-                    current_ref_freq,
-                    is_folded=self.is_folded,
-                )
+        self.spectrum_per_component = (10 ** np.array(self.amplitude)) * profile
 
-                self.timeprof_per_component[current_freq, :, current_component] = (
-                    rt.manipulate.downsample_1d(
-                        current_profile.mean(axis=0), self.factor_time_upsample
-                    )
-                )
-
-                # next, compute and scale profile by the spectral energy distribution.
-                current_profile *= rt.spectrum.compute_spectrum_rpl(
-                    current_freq_arr,
-                    current_ref_freq,
-                    current_sp_idx,
-                    current_sp_run,
-                )[:, None]
-
-                # before writing, downsize upsampled array to original size.
-                current_profile = rt.manipulate.downsample_1d(
-                    current_profile.mean(axis=0), self.factor_time_upsample
-                )
-
-                # before exiting the loop, save different snapshots of the model.
-                self.amplitude_per_component[current_freq, :, current_component] = (
-                    rt.spectrum.compute_spectrum_rpl(
-                        self.freqs[current_freq],
-                        current_ref_freq,
-                        current_sp_idx,
-                        current_sp_run,
-                    )
-                    * (10**current_amplitude)
-                )
-                self.spectrum_per_component[current_freq, :, current_component] = (
-                    10**current_amplitude
-                ) * current_profile
-
-                # print spectral index/running for current component.
-                if current_freq == 0:
-                    if self.verbose and not self.scintillation:
-                        print(f"{current_sp_idx:.5f}  {current_sp_run:.5f}")
-
-                    else:
-                        print()
-
-        # if desired, then compute per-channel amplitudes in cases where scintillation is significant.
+        # if scintillation is enabled compute per channel amplitude:
         if self.scintillation:
-            for freq in range(self.num_freq):
-                current_amplitudes = rt.ism.compute_amplitude_per_channel(
-                    data[freq], self.timeprof_per_component[freq, :, :]
-                )
-                # now compute model with per-channel amplitudes determined.
-                for component in range(self.num_components):
-                    current_profile = self.timeprof_per_component[freq, :, component]
-                    self.amplitude_per_component[freq, :, component] = (
-                        current_amplitudes[component]
-                    )
-                    self.spectrum_per_component[freq, :, component] = (
-                        current_amplitudes[component] * current_profile
-                    )
+            current_amplitudes = np.tile(
+                rt.ism.compute_amplitude_per_channel(data, self.timeprof_per_component)[
+                    :, np.newaxis, :
+                ],
+                (1, len(self.times), 1),
+            )
+
+            self.amplitude_per_component = current_amplitudes
+            self.spectrum_per_component = (
+                current_amplitudes * self.timeprof_per_component
+            )
 
         return np.sum(self.spectrum_per_component, axis=2)
 
