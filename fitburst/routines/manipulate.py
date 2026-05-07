@@ -7,6 +7,7 @@ upsampled or downsampled by specified factors.
 
 import numpy as np
 
+
 def downsample_1d(array_orig: float, factor: int, boolean: bool = False) -> float:
     """
     Downsamples an input array by the specified factor. It is assumed that the
@@ -40,6 +41,7 @@ def downsample_1d(array_orig: float, factor: int, boolean: bool = False) -> floa
 
     return array_downsampled
 
+
 def downsample_2d(spectrum_orig: float, factor_freq: int, factor_time: int) -> float:
     """
     Downsamples a two-dimensional dynamic spectrum and its time/frequency arrays
@@ -65,12 +67,18 @@ def downsample_2d(spectrum_orig: float, factor_freq: int, factor_time: int) -> f
 
     # compute original and new matrix shapes.
     num_freq, num_time = spectrum_orig.shape
-    shape_new = (num_freq // factor_freq, factor_freq, num_time // factor_time, factor_time)
+    shape_new = (
+        num_freq // factor_freq,
+        factor_freq,
+        num_time // factor_time,
+        factor_time,
+    )
 
     # now reshape and average to downsample.
     spectrum_downsampled = spectrum_orig.reshape(shape_new).mean(-1).mean(1)
 
     return spectrum_downsampled
+
 
 def upsample_1d(array_orig: float, diff_orig: float, factor: int) -> float:
     """
@@ -145,3 +153,34 @@ def upsample_orig(input_array: float, factor: int) -> float:
     output_array = input_array[:, None] + new_array[None, :]
 
     return output_array
+
+
+def downsample_tile(orig: np.ndarray, factors: list) -> np.ndarray:
+    """
+    Downsamples a tiled array (np.tile) by the specified factors list.
+
+    Parameters
+    ----------
+    orig : np.ndarray
+        The original array to downsample
+    factors : list
+        The factors to downsample. Must match the number of dimensions of the tiled array.
+
+    Returns
+    -------
+    np.ndarray
+        The downsampled version of the tile
+    """
+
+    assert len(orig.shape) == len(factors), (
+        f"Mismatch between number of factors and array shape: {len(factors)} vs {len(orig.shape)}"
+    )
+
+    shape_new = []
+    pos = []
+    for i, (f, s) in enumerate(zip(factors, orig.shape)):
+        shape_new.append(s // f)
+        shape_new.append(f)
+        pos.append(i * 2 + 1)
+
+    return np.mean(orig.reshape(shape_new), axis=tuple(pos))
