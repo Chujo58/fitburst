@@ -8,10 +8,11 @@ fitter object, and are written to handle user-specified fixing of parameters.
 """
 
 import sys
+
 import numpy as np
 
-from fitburst.backend import general
 import fitburst.routines as rt
+from fitburst.backend import general
 
 
 class SpectrumModeler:
@@ -117,10 +118,10 @@ class SpectrumModeler:
                 "Must be either (ntime,) or (nfreq, ntime)."
             )
 
-        if self.has_freq_dependent_times:
-            raise RuntimeError(
-                "The current branch doesn't allow for time dependent time arrays. Please use a 1D `times` array. Thanks!"
-            )
+        # if self.has_freq_dependent_times:
+        #     raise RuntimeError(
+        #         "The current branch doesn't allow for time dependent time arrays. Please use a 1D `times` array. Thanks!"
+        #     )
 
         # define all *fittable* model parameters first.
         # NOTE: 'ref_freq' is not listed here as it's a parameter that is always held fixed.
@@ -158,7 +159,7 @@ class SpectrumModeler:
             (self.num_freq, self.num_time, self.num_components), dtype=float
         )
 
-    def compute_model(self, data: float = None) -> float:
+    def compute_model(self, data: float | None = None) -> float:
         """
         Computes the model dynamic spectrum based on model parameters (set as class
         attributes) and input values of times and frequencies.
@@ -180,8 +181,8 @@ class SpectrumModeler:
                 current_amplitude = self.amplitude[current_component]
                 current_arrival_time = self.arrival_time[current_component]
                 current_dm = self.dm[0]
-                current_dm_index = self.dm_index[0]
-                current_ref_freq = self.ref_freq[current_component]
+                # current_dm_index = self.dm_index[0]
+                # current_ref_freq = self.ref_freq[current_component]
                 current_sc_idx = self.scattering_index[0]
                 current_sc_time = self.scattering_timescale[0]
                 current_sp_idx = self.spectral_index[current_component]
@@ -228,22 +229,34 @@ class SpectrumModeler:
         )
 
         # create a 2D array for each component containing the times and remove the toa.
-        time_dt = self.times.copy()
-        new_time_dt = np.array([time_dt] * self.num_components)
-        toas = np.tile(
-            np.array(self.arrival_time)[:, np.newaxis], (1, time_dt.shape[0])
-        )
+        toas = np.asarray(self.arrival_time, dtype=float)
+        times_minus_toa = self.times.copy()[..., np.newaxis] - toas
 
-        # now compute current-times array corrected for relative delay.
-        upsampled_times = rt.manipulate.upsample_1d(
-            (new_time_dt - toas).T, self.res_time, self.factor_time_upsample
-        )
+        if self.has_freq_dependent_times:
+            nfreq, ntime, ncomp = times_minus_toa.shape
+            flat = times_minus_toa.transpose(1, 0, 2).reshape(ntime, nfreq * ncomp)
 
-        # # the meshgrid stuff -> removing the dm delay
-        upsampled_times = upsampled_times[np.newaxis, :, :]
-        # Shape of tile: (num_upsampled_freqs, num_upsampled_times, num_components)
-        tile = np.tile(upsampled_times, (upsampled_frequencies.shape[0], 1, 1))
-        tile -= dm_delay[:, None, None]
+            # Upsample the data
+            flat_up = rt.manipulate.upsample_1d(
+                flat, self.res_time, self.factor_time_upsample
+            )
+
+            # Transform back into tile
+            tile = flat_up.reshape(-1, nfreq, ncomp).transpose(1, 0, 2)
+
+            # And since we upsampled, we need to share the duplicated axis:
+            tile = np.repeat(tile, self.factor_freq_upsample, axis=0)
+        else:
+            upsampled_times = rt.manipulate.upsample_1d(
+                times_minus_toa, self.res_time, self.factor_time_upsample
+            )
+            tile = np.tile(
+                upsampled_times[np.newaxis, :, :],
+                (upsampled_frequencies.shape[0], 1, 1),
+            )
+
+        # remove the (relative) DM delay; dm_delay is (nfreq_up,), so this broadcasts for both cases.
+        tile = tile - dm_delay[:, None, None]
 
         # Save the time difference for each component:
         self.timediff_per_component = rt.manipulate.downsample_tile(
@@ -441,14 +454,14 @@ class SpectrumModeler:
 
         # before exiting, grab the values of the reference frequency, which
         # isn't fittable and is therefore not in the 'parameters' list.
-        parameter_dict["ref_freq"] = getattr(self, "ref_freq")
+        parameter_dict["ref_freq"] = self.ref_freq
 
         return parameter_dict
 
     def update_parameters(
         self,
         model_parameters: dict,
-        global_parameters: list = ["dm", "scattering_timescale"],
+        global_parameters: list | None = None,
     ) -> None:
         """
         Overloads parameter values stored in object with those supplied by the user.
@@ -459,6 +472,9 @@ class SpectrumModeler:
             a Python dictionary with parameter names listed as keys, parameter values
             supplied as lists tied to keys.
 
+        global_parameters : list = ["dm", "scattering_timescale"]
+            a Python list with the parameter names that are kept constant across components.
+
         Returns
         -------
         None : None
@@ -466,17 +482,19 @@ class SpectrumModeler:
         """
 
         # first, overload attributes with values for supplied parameters.
-        for current_parameter in model_parameters.keys():
-            setattr(self, current_parameter, model_parameters[current_parameter])
+        if global_parameters is None:
+            global_parameters = ["dm", "scattering_timescale"]
+        for current_parameter, current_value in model_parameters.items():
+            setattr(self, current_parameter, current_value)
 
             # if number of components is 2 or greater, update num_components attribute.
-            if len(model_parameters[current_parameter]) > 1:
-                num_components = len(model_parameters[current_parameter])
-                setattr(self, "num_components", num_components)
+            if len(current_value) > 1:
+                num_components = len(current_value)
+                self.num_components = num_components
 
                 if current_parameter in global_parameters:
                     setattr(
                         self,
                         current_parameter,
-                        [model_parameters[current_parameter][0]] * num_components,
+                        [current_value[0]] * num_components,
                     )
