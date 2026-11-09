@@ -13,95 +13,39 @@ import numpy as np
 
 import fitburst.routines as rt
 from fitburst.backend import general
+from concurrent.futures import ThreadPoolExecutor
 
 
-class Component:
-    def __init__(self, freqs, times):
-        pass
-
-
-class SpectrumModeler:
-    """
-    A Python structure that contains all information regarding parameters that
-    describe and are used to compute models of dynamic spectra.
-    """
-
-    # pylint: disable=too-many-instance-attributes
-
+class ModelSlice:
     def __init__(
         self,
         freqs: float,
         times: float,
+        comp_start: int,
+        comp_end: int,
+        id: int,
         dm_incoherent: float = 0.0,
         factor_freq_upsample: int = 1,
         factor_time_upsample: int = 1,
-        num_components: int = 1,
         is_dedispersed: bool = False,
         is_folded: bool = False,
         scintillation: bool = False,
-        verbose: bool = False,
         save_intermediate: bool = False,
-    ) -> None:
-        """
-        Instantiates the model object and sets relevant parameters, depending on
-        desired model for spectral energy distribution.
-
-        Parameters
-        ----------
-
-        freqs: float
-            The frequency channels in the spectrum (including masked ones)
-
-        times: float
-            The time samples in the spectrum
-
-        dm_incoherent : float, optional
-            The DM used to incoherently dedisperse input data; this is only used if the
-            'is_dedispersed' argument is set to True
-
-        factor_freq_upsample : int, optional
-            The factor to upsample each frequency label into an array of subbands
-
-        factor_time_upsample : int, optional
-            The factor to upsample the array of timestamps
-
-        is_dedispersed : bool, optional
-            If true, then assume that the dispersion measure is an 'offset' parameter
-            and computes the relative dispersion for non-zero offset values
-
-        is_folded : bool, optional
-            If true, then the temporal profile is computed over two realizations and then
-            averaged down to one (in order to allow for wrapping of a folded pulse shape)
-
-        num_components : int, optional
-            The number of distinct burst components in the model
-
-        scintillation : bool, optional
-            if true, the compute per-channel amplitudes using input data.
-
-        verbose : bool, optional
-            If true, then print parameter values during each function call
-            (This is mainly useful to gauge least-squares fitting algorithms.)
-
-        save_intermediate: bool, optional
-            If true, this will save intermediate arrays for debugging.
-
-        """
-
-        # pylint: disable=too-many-arguments,too-many-locals
-
-        # first define model-configuration parameters that are not fittable.
+    ):
         self.dm_incoherent = dm_incoherent
         self.factor_freq_upsample = factor_freq_upsample
         self.factor_time_upsample = factor_time_upsample
         self.freqs = freqs
         self.is_dedispersed = is_dedispersed
         self.is_folded = is_folded
-        self.num_components = num_components
         self.scintillation = scintillation
         self.times = times
-        self.verbose = verbose
         self.save = save_intermediate
+
+        self.start_idx = comp_start
+        self.end_idx = comp_end
+        self.num_components = comp_end - comp_start
+        self.worker_id = id
 
         # derive some additional data needed for downstream fitting.
         self.num_freq = len(self.freqs)
@@ -109,29 +53,8 @@ class SpectrumModeler:
         self.res_freq = np.fabs(self.freqs[1] - self.freqs[0])
         self.res_time = np.fabs(self.times[..., 1] - self.times[..., 0])
 
-        # determine if the times array is frequency dependent
         if self.times.ndim == 1:
             self.has_freq_dependent_times = False
-
-        elif self.times.ndim == 2:
-            if self.times.shape[0] != self.num_freq:
-                raise RuntimeError(
-                    "times array has more than one dimension, "
-                    "but first dimension does not match frequency axis."
-                )
-
-            self.has_freq_dependent_times = True
-
-        else:
-            raise RuntimeError(
-                "Do not recognize shape of times array. "
-                "Must be either (ntime,) or (nfreq, ntime)."
-            )
-
-        # if self.has_freq_dependent_times:
-        #     raise RuntimeError(
-        #         "The current branch doesn't allow for time dependent time arrays. Please use a 1D `times` array. Thanks!"
-        #     )
 
         # define all *fittable* model parameters first.
         # NOTE: 'ref_freq' is not listed here as it's a parameter that is always held fixed.
@@ -151,23 +74,24 @@ class SpectrumModeler:
         for current_parameter in self.parameters:
             setattr(self, current_parameter, None)
 
-        # now instantiate the structures for per-component models, time differences, and temporal profiles.
-        # (the following are used for computing derivatives and/or per-channel amplitudes.)
-        self.amplitude_per_component = np.zeros(
-            (self.num_freq, self.num_time, self.num_components), dtype=float
-        )
+        if self.save:
+            # now instantiate the structures for per-component models, time differences, and temporal profiles.
+            # (the following are used for computing derivatives and/or per-channel amplitudes.)
+            self.amplitude_per_component = np.zeros(
+                (self.num_freq, self.num_time, self.num_components), dtype=float
+            )
 
-        self.spectrum_per_component = np.zeros(
-            (self.num_freq, self.num_time, self.num_components), dtype=float
-        )
+            self.spectrum_per_component = np.zeros(
+                (self.num_freq, self.num_time, self.num_components), dtype=float
+            )
 
-        self.timediff_per_component = np.zeros(
-            (self.num_freq, self.num_time, self.num_components), dtype=float
-        )
+            self.timediff_per_component = np.zeros(
+                (self.num_freq, self.num_time, self.num_components), dtype=float
+            )
 
-        self.timeprof_per_component = np.zeros(
-            (self.num_freq, self.num_time, self.num_components), dtype=float
-        )
+            self.timeprof_per_component = np.zeros(
+                (self.num_freq, self.num_time, self.num_components), dtype=float
+            )
 
     def compute_model(self, data: float | None = None) -> float:
         """
@@ -185,28 +109,6 @@ class SpectrumModeler:
         # if scintillation modeling is desired but data aren't provide, then exit.
         if self.scintillation and data is None:
             sys.exit("ERROR: scintillation modelling is desired by data are missing!")
-
-        if self.verbose:
-            for current_component in range(self.num_components):
-                current_amplitude = self.amplitude[current_component]
-                current_arrival_time = self.arrival_time[current_component]
-                current_dm = self.dm[0]
-                current_sc_idx = self.scattering_index[0]
-                current_sc_time = self.scattering_timescale[0]
-                current_sp_idx = self.spectral_index[current_component]
-                current_sp_run = self.spectral_running[current_component]
-                current_width = self.burst_width[current_component]
-
-                if self.scintillation:
-                    print(
-                        f"{current_dm:.5f} {current_arrival_time:.5f} ",
-                        f"{current_sc_idx:.5f}  {current_sc_time:.5f}  {current_width:.5f}",
-                    )
-                else:
-                    print(
-                        f"{current_dm:.5f}  {current_amplitude:.5f}  {current_arrival_time:.5f}  ",
-                        f"{current_sc_idx:.5f}  {current_sc_time:.5f}  {current_width:.5f} {current_sp_idx:.5f}  {current_sp_run:.5f}",
-                    )
 
         # create an upsampled version of the current frequency label.
         # even if no upsampling is desired, this will return an array
@@ -351,7 +253,7 @@ class SpectrumModeler:
                 current_amplitudes * self.timeprof_per_component
             )
 
-        return np.sum(self.spectrum_per_component, axis=0)
+        return self.spectrum_per_component
 
     def compute_profile(
         self,
@@ -460,6 +362,232 @@ class SpectrumModeler:
 
         return profile
 
+    def update_parameters(
+        self,
+        model_parameters: dict,
+        global_parameters: list | None = None,
+    ) -> None:
+        """
+        Overloads parameter values stored in object with those supplied by the user.
+
+        Parameters
+        ----------
+        model_parameters : dict
+            a Python dictionary with parameter names listed as keys, parameter values
+            supplied as lists tied to keys.
+
+        global_parameters : list = ["dm", "scattering_timescale"]
+            a Python list with the parameter names that are kept constant across components.
+
+        Returns
+        -------
+        None : None
+            this method overloads class attributes.
+        """
+
+        # first, overload attributes with values for supplied parameters.
+        if global_parameters is None:
+            global_parameters = ["dm", "scattering_timescale"]
+        for current_parameter, current_value in model_parameters.items():
+            setattr(self, current_parameter, current_value)
+
+            # if number of components is 2 or greater, update num_components attribute.
+            if len(current_value) > 1:
+                num_components = len(current_value)
+
+                if current_parameter in global_parameters:
+                    setattr(
+                        self,
+                        current_parameter,
+                        [current_value[0]] * num_components,
+                    )
+
+
+class SpectrumModeler:
+    """
+    A Python structure that contains all information regarding parameters that
+    describe and are used to compute models of dynamic spectra.
+    """
+
+    # pylint: disable=too-many-instance-attributes
+
+    def __init__(
+        self,
+        freqs: float,
+        times: float,
+        dm_incoherent: float = 0.0,
+        factor_freq_upsample: int = 1,
+        factor_time_upsample: int = 1,
+        num_components: int = 1,
+        is_dedispersed: bool = False,
+        is_folded: bool = False,
+        scintillation: bool = False,
+        verbose: bool = False,
+        save_intermediate: bool = False,
+        num_threads: int = 1,
+    ) -> None:
+        """
+        Instantiates the model object and sets relevant parameters, depending on
+        desired model for spectral energy distribution.
+
+        Parameters
+        ----------
+
+        freqs: float
+            The frequency channels in the spectrum (including masked ones)
+
+        times: float
+            The time samples in the spectrum
+
+        dm_incoherent : float, optional
+            The DM used to incoherently dedisperse input data; this is only used if the
+            'is_dedispersed' argument is set to True
+
+        factor_freq_upsample : int, optional
+            The factor to upsample each frequency label into an array of subbands
+
+        factor_time_upsample : int, optional
+            The factor to upsample the array of timestamps
+
+        is_dedispersed : bool, optional
+            If true, then assume that the dispersion measure is an 'offset' parameter
+            and computes the relative dispersion for non-zero offset values
+
+        is_folded : bool, optional
+            If true, then the temporal profile is computed over two realizations and then
+            averaged down to one (in order to allow for wrapping of a folded pulse shape)
+
+        num_components : int, optional
+            The number of distinct burst components in the model
+
+        scintillation : bool, optional
+            if true, the compute per-channel amplitudes using input data.
+
+        verbose : bool, optional
+            If true, then print parameter values during each function call
+            (This is mainly useful to gauge least-squares fitting algorithms.)
+
+        save_intermediate : bool, optional
+            If true, this will save intermediate arrays for debugging.
+        num_threads : int, optional
+            Sets the number of threads used for the parallelized computations of the model.
+        """
+
+        # pylint: disable=too-many-arguments,too-many-locals
+
+        # first define model-configuration parameters that are not fittable.
+        self.dm_incoherent = dm_incoherent
+        self.factor_freq_upsample = factor_freq_upsample
+        self.factor_time_upsample = factor_time_upsample
+        self.freqs = freqs
+        self.is_dedispersed = is_dedispersed
+        self.is_folded = is_folded
+        self.num_components = num_components
+        self.scintillation = scintillation
+        self.times = times
+        self.verbose = verbose
+        self.save = save_intermediate
+
+        # derive some additional data needed for downstream fitting.
+        self.num_freq = len(self.freqs)
+        self.num_time = self.times.shape[-1]
+        self.res_freq = np.fabs(self.freqs[1] - self.freqs[0])
+        self.res_time = np.fabs(self.times[..., 1] - self.times[..., 0])
+
+        # determine if the times array is frequency dependent
+        if self.times.ndim == 1:
+            self.has_freq_dependent_times = False
+
+        elif self.times.ndim == 2:
+            if self.times.shape[0] != self.num_freq:
+                raise RuntimeError(
+                    "times array has more than one dimension, "
+                    "but first dimension does not match frequency axis."
+                )
+
+            self.has_freq_dependent_times = True
+
+        else:
+            raise RuntimeError(
+                "Do not recognize shape of times array. "
+                "Must be either (ntime,) or (nfreq, ntime)."
+            )
+
+        # define all *fittable* model parameters first.
+        # NOTE: 'ref_freq' is not listed here as it's a parameter that is always held fixed.
+        self.parameters = [
+            "amplitude",
+            "arrival_time",
+            "burst_width",
+            "dm",
+            "dm_index",
+            "scattering_timescale",
+            "scattering_index",
+            "spectral_index",
+            "spectral_running",
+        ]
+
+        # now instantiate parameter attributes and set initially to NoneType.
+        for current_parameter in self.parameters:
+            setattr(self, current_parameter, None)
+
+        # Initialize the slices here.
+        self.actual_workers = min(num_threads, self.num_components)
+        split_indices = np.array_split(
+            np.arange(self.num_components), self.actual_workers
+        )
+
+        self.slices = [
+            ModelSlice(
+                self.freqs,
+                self.times,
+                int(arr[0]),
+                int(arr[-1]) + 1,
+                idx,
+                self.dm_incoherent,
+                self.factor_freq_upsample,
+                self.factor_time_upsample,
+                self.is_dedispersed,
+                self.is_folded,
+                self.scintillation,
+                self.save,
+            )
+            for idx, arr in enumerate(split_indices)
+            if len(arr > 0)
+        ]
+
+    def compute_model(self, data: float | None = None) -> float:
+        if self.verbose:
+            for current_component in range(self.num_components):
+                current_amplitude = self.amplitude[current_component]
+                current_arrival_time = self.arrival_time[current_component]
+                current_dm = self.dm[0]
+                current_sc_idx = self.scattering_index[0]
+                current_sc_time = self.scattering_timescale[0]
+                current_sp_idx = self.spectral_index[current_component]
+                current_sp_run = self.spectral_running[current_component]
+                current_width = self.burst_width[current_component]
+
+                if self.scintillation:
+                    print(
+                        f"{current_dm:.5f} {current_arrival_time:.5f} ",
+                        f"{current_sc_idx:.5f}  {current_sc_time:.5f}  {current_width:.5f}",
+                    )
+                else:
+                    print(
+                        f"{current_dm:.5f}  {current_amplitude:.5f}  {current_arrival_time:.5f}  ",
+                        f"{current_sc_idx:.5f}  {current_sc_time:.5f}  {current_width:.5f} {current_sp_idx:.5f}  {current_sp_run:.5f}",
+                    )
+
+        def work(slice_object: ModelSlice):
+            return slice_object.compute_model(data)
+
+        with ThreadPoolExecutor(max_workers=self.actual_workers) as executor:
+            results = list(executor.map(work, self.slices))
+
+        full_spectrum = np.concatenate(results, axis=0)
+        return np.sum(full_spectrum, axis=0)
+
     def get_parameters_dict(self) -> dict:
         """
         Returns model parameters as a dictionary, with keys set to the parameter names
@@ -478,10 +606,16 @@ class SpectrumModeler:
         """
 
         parameter_dict = {}
+        for current_parameter in self.parameters:
+            parameter_dict[current_parameter] = []
 
         # loop over all fittable parameters and grab their values.
-        for current_parameter in self.parameters:
-            parameter_dict[current_parameter] = getattr(self, current_parameter)
+        # for current_parameter in self.parameters:
+        #     parameter_dict[current_parameter] = getattr(self, current_parameter)
+
+        for slice in self.slices:
+            for p, v in slice.parameters.items():
+                parameter_dict[p].extend(v)
 
         # before exiting, grab the values of the reference frequency, which
         # isn't fittable and is therefore not in the 'parameters' list.
@@ -529,3 +663,12 @@ class SpectrumModeler:
                         current_parameter,
                         [current_value[0]] * num_components,
                     )
+
+        # Then let's update the slices:
+        for slice in self.slices:
+            start_idx = slice.start_idx
+            end_idx = slice.end_idx
+
+            new_params = {k: v[start_idx:end_idx] for k, v in model_parameters.items()}
+
+            slice.update_parameters(new_params, global_parameters)
