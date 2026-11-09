@@ -15,6 +15,11 @@ import fitburst.routines as rt
 from fitburst.backend import general
 
 
+class Component:
+    def __init__(self, freqs, times):
+        pass
+
+
 class SpectrumModeler:
     """
     A Python structure that contains all information regarding parameters that
@@ -217,16 +222,21 @@ class SpectrumModeler:
         )
 
         # then compute "relative" delays with respect to central frequency.
-        dm_delay -= np.repeat(
-            rt.ism.compute_time_dm_delay(
-                self.dm_incoherent,
-                general["constants"]["dispersion"],
-                self.dm_index[0],
-                self.freqs,
-                self.ref_freq[0],
-            ),
-            self.factor_freq_upsample,
-        )
+        if not self.has_freq_dependent_times:
+            # if the time axis is shared across all freqs,
+            # incoherent dedispersion has already aligned to
+            # `ref_freq`. Remove that alignment here so the
+            # residual DM term is applied consistently per channel.
+            dm_delay -= np.repeat(
+                rt.ism.compute_time_dm_delay(
+                    self.dm_incoherent,
+                    general["constants"]["dispersion"],
+                    self.dm_index[0],
+                    self.freqs,
+                    self.ref_freq[0],
+                ),
+                self.factor_freq_upsample,
+            )
 
         # create a 2D array for each component containing the times and remove the toa.
         toas = np.asarray(self.arrival_time, dtype=float)
