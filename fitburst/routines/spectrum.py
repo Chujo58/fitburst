@@ -41,9 +41,7 @@ def compute_spectrum_rpl(
     sp_idx = np.array(sp_idx)
     sp_run = np.array(sp_run)
 
-    log_freq = np.tile(
-        np.log(freqs / freq_ref).reshape(len(freqs), 1), (1, len(sp_idx))
-    )
-    exponent = log_freq * sp_idx[None, :] + log_freq**2 * sp_run[None, :]
+    log_freq = np.log(freqs / freq_ref)[np.newaxis, ...]
+    exponent = log_freq * sp_idx[:, None] + log_freq**2 * sp_run[:, None]
     spectrum = np.exp(exponent)
     return spectrum

@@ -28,15 +28,14 @@ def compute_amplitude_per_channel(data: float, model: float) -> float:
         The value of the amplitude in the given frequency channel.
     """
 
-    data_prof_vector = np.einsum("ft,ftc->fc", data, model)
-    amplitudes_matrix = np.einsum("fti,ftj->fij", model, model)
-    if np.__version__ > "1":
-        res = np.zeros(data_prof_vector.shape)
-        for i in range(data_prof_vector.shape[0]):
-            res[i] = np.linalg.solve(amplitudes_matrix[i], data_prof_vector[i])
-        return res
-    else:
-        return np.linalg.solve(amplitudes_matrix, data_prof_vector)
+    data_prof_vector = np.einsum("ft,ift->if", data, model)
+    amplitudes_matrix = np.einsum("ift,jft->fij", model, model)
+
+    b = np.moveaxis(data_prof_vector[..., np.newaxis], 1, 0)
+    res_raw = np.linalg.solve(amplitudes_matrix, b)
+
+    res_2d = np.squeeze(res_raw, axis=-1)
+    return np.swapaxes(res_2d, 0, 1)
 
 
 def compute_time_dm_delay(

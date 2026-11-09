@@ -40,6 +40,7 @@ class SpectrumModeler:
         is_folded: bool = False,
         scintillation: bool = False,
         verbose: bool = False,
+        save_intermediate: bool = False,
     ) -> None:
         """
         Instantiates the model object and sets relevant parameters, depending on
@@ -82,6 +83,9 @@ class SpectrumModeler:
             If true, then print parameter values during each function call
             (This is mainly useful to gauge least-squares fitting algorithms.)
 
+        save_intermediate: bool, optional
+            If true, this will save intermediate arrays for debugging.
+
         """
 
         # pylint: disable=too-many-arguments,too-many-locals
@@ -97,6 +101,7 @@ class SpectrumModeler:
         self.scintillation = scintillation
         self.times = times
         self.verbose = verbose
+        self.save = save_intermediate
 
         # derive some additional data needed for downstream fitting.
         self.num_freq = len(self.freqs)
@@ -186,8 +191,6 @@ class SpectrumModeler:
                 current_amplitude = self.amplitude[current_component]
                 current_arrival_time = self.arrival_time[current_component]
                 current_dm = self.dm[0]
-                # current_dm_index = self.dm_index[0]
-                # current_ref_freq = self.ref_freq[current_component]
                 current_sc_idx = self.scattering_index[0]
                 current_sc_time = self.scattering_timescale[0]
                 current_sp_idx = self.spectral_index[current_component]
@@ -210,7 +213,7 @@ class SpectrumModeler:
         # of length 1.
         upsampled_frequencies = rt.manipulate.upsample_1d(
             self.freqs, self.res_freq, self.factor_freq_upsample
-        )
+        )  # shape: (freqs * upsampling,)
 
         # first, compute "full" delays for all upsampled frequency labels.
         dm_delay = rt.ism.compute_time_dm_delay(
@@ -219,7 +222,7 @@ class SpectrumModeler:
             self.dm_index[0],
             upsampled_frequencies,
             self.ref_freq[0],
-        )
+        )  # shape: (freqs * upsampling,)
 
         # then compute "relative" delays with respect to central frequency.
         if not self.has_freq_dependent_times:
@@ -234,44 +237,58 @@ class SpectrumModeler:
                     self.dm_index[0],
                     self.freqs,
                     self.ref_freq[0],
-                ),
+                ),  # shape: (freqs,)
                 self.factor_freq_upsample,
-            )
+            )  # shape: (freqs * upsampling,)
 
         # create a 2D array for each component containing the times and remove the toa.
-        toas = np.asarray(self.arrival_time, dtype=float)
-        times_minus_toa = self.times.copy()[..., np.newaxis] - toas
+        toas = np.asarray(self.arrival_time, dtype=float)  # shape: (comps, )
 
         if self.has_freq_dependent_times:
-            nfreq, ntime, ncomp = times_minus_toa.shape
-            flat = times_minus_toa.transpose(1, 0, 2).reshape(ntime, nfreq * ncomp)
+            times_minus_toa = self.times[None, ..., :] - toas[:, None, None]
+            ncomp, nfreq, ntime = times_minus_toa.shape
+
+            # Transpose the time axis up front, before combining axis 0 and 1
+            flat_T = (
+                times_minus_toa.transpose(2, 0, 1).reshape(ntime, ncomp * nfreq).copy()
+            )
 
             # Upsample the data
-            flat_up = rt.manipulate.upsample_1d(
-                flat, self.res_time, self.factor_time_upsample
+            flat_up_T = rt.manipulate.upsample_1d(
+                flat_T, self.res_time, self.factor_time_upsample
             )
 
             # Transform back into tile
-            tile = flat_up.reshape(-1, nfreq, ncomp).transpose(1, 0, 2)
+            tile = flat_up_T.reshape(-1, ncomp, nfreq).transpose(
+                1, 2, 0
+            )  # shape: (comps, freqs * upsampling, time * upsampling)
 
             # And since we upsampled, we need to share the duplicated axis:
-            tile = np.repeat(tile, self.factor_freq_upsample, axis=0)
+            tile = np.repeat(tile, self.factor_freq_upsample, axis=1)
         else:
-            upsampled_times = rt.manipulate.upsample_1d(
-                times_minus_toa, self.res_time, self.factor_time_upsample
-            )
-            tile = np.tile(
-                upsampled_times[np.newaxis, :, :],
-                (upsampled_frequencies.shape[0], 1, 1),
+            times_minus_toa_T = self.times[:, None, None] - toas[None, :, None]
+            upsampled_times_T = rt.manipulate.upsample_1d(
+                times_minus_toa_T, self.res_time, self.factor_time_upsample
+            )  # shape: (time * upsampling, comps, freqs)
+
+            upsampled_times = upsampled_times_T.transpose(
+                1, 2, 0
+            )  # shape: (comps, freqs, time * upsampling)
+
+            tile = np.repeat(
+                upsampled_times,
+                upsampled_frequencies.shape,
+                axis=1,
             )
 
         # remove the (relative) DM delay; dm_delay is (nfreq_up,), so this broadcasts for both cases.
-        tile = tile - dm_delay[:, None, None]
+        tile = tile - dm_delay[None, :, None]
 
         # Save the time difference for each component:
-        self.timediff_per_component = rt.manipulate.downsample_tile(
-            tile, [self.factor_freq_upsample, self.factor_time_upsample, 1]
-        )
+        if self.save:
+            self.timediff_per_component = rt.manipulate.downsample_tile(
+                tile, [1, self.factor_freq_upsample, self.factor_time_upsample]
+            )  # shape: (comp, freqs, time)
 
         # next, compute and store raw temporal profile.
         profile = self.compute_profile(
@@ -286,9 +303,10 @@ class SpectrumModeler:
         )
 
         # Again, save the profile for each component:
-        self.timeprof_per_component = rt.manipulate.downsample_tile(
-            profile, [self.factor_freq_upsample, self.factor_time_upsample, 1]
-        )
+        if self.save or self.scintillation:
+            self.timeprof_per_component = rt.manipulate.downsample_tile(
+                profile, [1, self.factor_freq_upsample, self.factor_time_upsample]
+            )
 
         # Compute the spectrum and add it to the profile:
         profile *= rt.spectrum.compute_spectrum_rpl(
@@ -296,43 +314,44 @@ class SpectrumModeler:
             self.ref_freq[0],
             self.spectral_index,
             self.spectral_running,
-        )[:, None, :]
+        )[:, :, None]
 
         # Downsample the profile for a final time:
         profile = rt.manipulate.downsample_tile(
-            profile, [self.factor_freq_upsample, self.factor_time_upsample, 1]
+            profile, [1, self.factor_freq_upsample, self.factor_time_upsample]
         )
 
-        self.amplitude_per_component = np.tile(
-            (
+        if self.save:
+            # Save the amplitudes scaled up with the SED.
+            self.amplitude_per_component = (
                 rt.spectrum.compute_spectrum_rpl(
                     self.freqs,
                     self.ref_freq[0],
                     self.spectral_index,
                     self.spectral_running,
                 )
-                * (10 ** np.array(self.amplitude))
-            )[:, np.newaxis, :],
-            (1, len(self.times), 1),
-        )
+                * (10 ** np.array(self.amplitude))[:, None]
+            )  # shape: (comp, freqs)
 
-        self.spectrum_per_component = (10 ** np.array(self.amplitude)) * profile
+        self.spectrum_per_component = (
+            profile * (10 ** np.array(self.amplitude))[:, None, None]
+        )
 
         # if scintillation is enabled compute per channel amplitude:
         if self.scintillation:
-            current_amplitudes = np.tile(
-                rt.ism.compute_amplitude_per_channel(data, self.timeprof_per_component)[
-                    :, np.newaxis, :
-                ],
-                (1, len(self.times), 1),
+            amps_2d = rt.ism.compute_amplitude_per_channel(
+                data, self.timeprof_per_component
             )
+            current_amplitudes = amps_2d[:, :, np.newaxis]
 
-            self.amplitude_per_component = current_amplitudes
+            if self.save:
+                self.amplitude_per_component = current_amplitudes
+
             self.spectrum_per_component = (
                 current_amplitudes * self.timeprof_per_component
             )
 
-        return np.sum(self.spectrum_per_component, axis=2)
+        return np.sum(self.spectrum_per_component, axis=0)
 
     def compute_profile(
         self,
@@ -390,13 +409,15 @@ class SpectrumModeler:
         times_copy = times.copy()
 
         if is_folded:
-            res_time = np.diff(times_copy, axis=1)[:, 0]
-            start = times[:, -1] + res_time
-            stop = times[:, -1] + (res_time * times.shape[1])
+            # Use the last axis for time extension
+            res_time = np.diff(times_copy, axis=2)[:, :, 0]
+            start = times[:, :, -1] + res_time
+            stop = times[:, :, -1] + (res_time * times.shape[2])
+
             times_extended = np.linspace(
-                start=start, stop=stop, num=times.shape[1], axis=1
+                start=start, stop=stop, num=times.shape[2], axis=2
             )
-            times_copy = np.append(times, times_extended, axis=1)
+            times_copy = np.append(times, times_extended, axis=2)
 
         # compute either Gaussian or pulse-broadening function, depending on inputs.
         profile = np.zeros(times_copy.shape, dtype=float)
@@ -405,13 +426,13 @@ class SpectrumModeler:
 
         if np.any(sc_time > 0.0):
             # Setup the masking
-            threshold = (np.array(width) * -5).reshape(1, 1, len(width))
+            threshold = (np.array(width) * -5)[:, None, None]  # shape: (comp, 1, 1)
             mask = times_copy < threshold
 
             replacement_value = np.tile(
-                (-5 * np.array(width)).reshape(1, 1, (len(width))),
-                (times.shape[0], times.shape[1], 1),
-            )
+                threshold,
+                (1, times.shape[1], times.shape[2]),
+            )  # shape: (comp, freqs, time)
 
             times_copy[mask] = replacement_value[mask]
 
@@ -434,8 +455,8 @@ class SpectrumModeler:
         # average along the appropriate axis to obtain a single realization.
         if is_folded:
             profile = profile.reshape(
-                times.shape[0], 2, times.shape[1], times.shape[2]
-            ).mean(axis=1)
+                times.shape[0], times.shape[1], 2, times.shape[2]
+            ).mean(axis=2)
 
         return profile
 

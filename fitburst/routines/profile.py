@@ -97,32 +97,26 @@ def compute_profile_pbf(
     -----
     The PBF equation is taken from McKinnon et al. (2004).
     """
-    sc_time = sc_time_ref * (freq / ref_freq) ** sc_index
+    sc_time = sc_time_ref * (freq / ref_freq) ** sc_index  # shape: (freqs,)
 
-    z = (
-        (time - toa) / width
-    )  # Normally a 1D array with all the times for one frequency and one component. Here a (num_freq, num_time, num_comp) array
-    ratio = (
-        np.tile(np.array(width).reshape(1, len(width)), (len(sc_time), 1))
-        / sc_time[:, None]
-    )
+    z = (time - np.array(toa)) / np.array(width)[:, None, None]
+    # Normally a 1D array with all the times for one frequency and one component. Here a (num_comp, num_freq, num_time) array. Decomposition of operations: (ncomp, nfreq, ntime) - (ncomp, 1, 1) / (ncomp, 1, 1)
+    ratio_2d = (
+        np.array(width)[:, None] / sc_time[None, :]
+    )  # shapes: (comp, 1)/(1, freqs) -> (comp, freqs)
 
-    # Expand the ratio to the same shape as the time array:
-    ratio = np.tile(ratio[:, np.newaxis, :], (1, time.shape[1], 1))
+    ratio = ratio_2d[..., None]  # Add the extra axis for time.
 
     arg1 = (
         (ratio - z) / np.sqrt(2)
-    )  # Normally a 1D array with all the times for one frequency and one component. Here a (num_freq, num_time, num_comp) array
+    )  # Normally a 1D array with all the times for one frequency and one component. Here a (num_comp, num_freq, num_time) array
 
     # Calculate the amplitude:
-    amp_term = (
-        np.sqrt(np.pi / 2) * ratio
-        if normalize
-        else np.tile(
-            (sc_time_ref / sc_time).reshape(len(sc_time), 1, 1),
-            (1, time.shape[1], time.shape[2]),
-        )
-    )
+    if normalize:
+        amp_term = np.sqrt(np.pi / 2) * ratio
+    else:
+        # sc_time_ref / sc_time is (nfreq,) -> expand to (1, nfreq, 1)
+        amp_term = (sc_time_ref / sc_time)[None, :, None]
 
     profile = np.empty(time.shape, dtype=float)
 
