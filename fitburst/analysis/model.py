@@ -30,7 +30,6 @@ class ModelSlice:
         is_dedispersed: bool = False,
         is_folded: bool = False,
         scintillation: bool = False,
-        save_intermediate: bool = False,
     ):
         self.dm_incoherent = dm_incoherent
         self.factor_freq_upsample = factor_freq_upsample
@@ -40,7 +39,6 @@ class ModelSlice:
         self.is_folded = is_folded
         self.scintillation = scintillation
         self.times = times
-        self.save = save_intermediate
 
         self.start_idx = comp_start
         self.end_idx = comp_end
@@ -74,24 +72,23 @@ class ModelSlice:
         for current_parameter in self.parameters:
             setattr(self, current_parameter, None)
 
-        if self.save:
-            # now instantiate the structures for per-component models, time differences, and temporal profiles.
-            # (the following are used for computing derivatives and/or per-channel amplitudes.)
-            self.amplitude_per_component = np.zeros(
-                (self.num_freq, self.num_time, self.num_components), dtype=float
-            )
+        # now instantiate the structures for per-component models, time differences, and temporal profiles.
+        # (the following are used for computing derivatives and/or per-channel amplitudes.)
+        self.amplitude_per_component = np.zeros(
+            (self.num_freq, self.num_time, self.num_components), dtype=float
+        )
 
-            self.spectrum_per_component = np.zeros(
-                (self.num_freq, self.num_time, self.num_components), dtype=float
-            )
+        self.spectrum_per_component = np.zeros(
+            (self.num_freq, self.num_time, self.num_components), dtype=float
+        )
 
-            self.timediff_per_component = np.zeros(
-                (self.num_freq, self.num_time, self.num_components), dtype=float
-            )
+        self.timediff_per_component = np.zeros(
+            (self.num_freq, self.num_time, self.num_components), dtype=float
+        )
 
-            self.timeprof_per_component = np.zeros(
-                (self.num_freq, self.num_time, self.num_components), dtype=float
-            )
+        self.timeprof_per_component = np.zeros(
+            (self.num_freq, self.num_time, self.num_components), dtype=float
+        )
 
     def compute_model(self, data: float | None = None) -> float:
         """
@@ -187,10 +184,9 @@ class ModelSlice:
         tile = tile - dm_delay[None, :, None]
 
         # Save the time difference for each component:
-        if self.save:
-            self.timediff_per_component = rt.manipulate.downsample_tile(
-                tile, [1, self.factor_freq_upsample, self.factor_time_upsample]
-            )  # shape: (comp, freqs, time)
+        self.timediff_per_component = rt.manipulate.downsample_tile(
+            tile, [1, self.factor_freq_upsample, self.factor_time_upsample]
+        )  # shape: (comp, freqs, time)
 
         # next, compute and store raw temporal profile.
         profile = self.compute_profile(
@@ -205,10 +201,9 @@ class ModelSlice:
         )
 
         # Again, save the profile for each component:
-        if self.save or self.scintillation:
-            self.timeprof_per_component = rt.manipulate.downsample_tile(
-                profile, [1, self.factor_freq_upsample, self.factor_time_upsample]
-            )
+        self.timeprof_per_component = rt.manipulate.downsample_tile(
+            profile, [1, self.factor_freq_upsample, self.factor_time_upsample]
+        )
 
         # Compute the spectrum and add it to the profile:
         profile *= rt.spectrum.compute_spectrum_rpl(
@@ -223,9 +218,9 @@ class ModelSlice:
             profile, [1, self.factor_freq_upsample, self.factor_time_upsample]
         )
 
-        if self.save:
-            # Save the amplitudes scaled up with the SED.
-            self.amplitude_per_component = (
+        # Save the amplitudes scaled up with the SED.
+        self.amplitude_per_component = np.repeat(
+            (
                 rt.spectrum.compute_spectrum_rpl(
                     self.freqs,
                     self.ref_freq[0],
@@ -233,8 +228,11 @@ class ModelSlice:
                     self.spectral_running,
                 )
                 * (10 ** np.array(self.amplitude))[:, None]
-            )  # shape: (comp, freqs)
-
+            )[:, :, np.newaxis],
+            profile.shape[-1],
+            axis=2,
+        )
+        # shape: (comp, freqs)
         self.spectrum_per_component = (
             profile * (10 ** np.array(self.amplitude))[:, None, None]
         )
@@ -246,8 +244,7 @@ class ModelSlice:
             )
             current_amplitudes = amps_2d[:, :, np.newaxis]
 
-            if self.save:
-                self.amplitude_per_component = current_amplitudes
+            self.amplitude_per_component = current_amplitudes
 
             self.spectrum_per_component = (
                 current_amplitudes * self.timeprof_per_component
@@ -423,7 +420,6 @@ class SpectrumModeler:
         is_folded: bool = False,
         scintillation: bool = False,
         verbose: bool = False,
-        save_intermediate: bool = False,
         num_threads: int = 1,
     ) -> None:
         """
@@ -486,7 +482,6 @@ class SpectrumModeler:
         self.scintillation = scintillation
         self.times = times
         self.verbose = verbose
-        self.save = save_intermediate
 
         # derive some additional data needed for downstream fitting.
         self.num_freq = len(self.freqs)
@@ -531,6 +526,24 @@ class SpectrumModeler:
         for current_parameter in self.parameters:
             setattr(self, current_parameter, None)
 
+        # now instantiate the structures for per-component models, time differences, and temporal profiles.
+        # (the following are used for computing derivatives and/or per-channel amplitudes.)
+        self.amplitude_per_component = np.zeros(
+            (self.num_freq, self.num_time, self.num_components), dtype=float
+        )
+
+        self.spectrum_per_component = np.zeros(
+            (self.num_freq, self.num_time, self.num_components), dtype=float
+        )
+
+        self.timediff_per_component = np.zeros(
+            (self.num_freq, self.num_time, self.num_components), dtype=float
+        )
+
+        self.timeprof_per_component = np.zeros(
+            (self.num_freq, self.num_time, self.num_components), dtype=float
+        )
+
         # Initialize the slices here.
         self.actual_workers = min(num_threads, self.num_components)
         split_indices = np.array_split(
@@ -550,7 +563,6 @@ class SpectrumModeler:
                 self.is_dedispersed,
                 self.is_folded,
                 self.scintillation,
-                self.save,
             )
             for idx, arr in enumerate(split_indices)
             if len(arr > 0)
@@ -586,6 +598,19 @@ class SpectrumModeler:
             results = list(executor.map(work, self.slices))
 
         full_spectrum = np.concatenate(results, axis=0)
+        self.amplitude_per_component = np.concatenate(
+            [slice.amplitude_per_component for slice in self.slices], axis=0
+        ).transpose(1, 2, 0)
+        self.spectrum_per_component = np.concatenate(
+            [slice.spectrum_per_component for slice in self.slices], axis=0
+        ).transpose(1, 2, 0)
+        self.timediff_per_component = np.concatenate(
+            [slice.timediff_per_component for slice in self.slices], axis=0
+        ).transpose(1, 2, 0)
+        self.timeprof_per_component = np.concatenate(
+            [slice.timeprof_per_component for slice in self.slices], axis=0
+        ).transpose(1, 2, 0)
+
         return np.sum(full_spectrum, axis=0)
 
     def get_parameters_dict(self) -> dict:
@@ -610,12 +635,8 @@ class SpectrumModeler:
             parameter_dict[current_parameter] = []
 
         # loop over all fittable parameters and grab their values.
-        # for current_parameter in self.parameters:
-        #     parameter_dict[current_parameter] = getattr(self, current_parameter)
-
-        for slice in self.slices:
-            for p, v in slice.parameters.items():
-                parameter_dict[p].extend(v)
+        for current_parameter in self.parameters:
+            parameter_dict[current_parameter] = getattr(self, current_parameter)
 
         # before exiting, grab the values of the reference frequency, which
         # isn't fittable and is therefore not in the 'parameters' list.
@@ -669,6 +690,11 @@ class SpectrumModeler:
             start_idx = slice.start_idx
             end_idx = slice.end_idx
 
-            new_params = {k: v[start_idx:end_idx] for k, v in model_parameters.items()}
+            new_params = {
+                k: v[start_idx:end_idx]
+                if k not in global_parameters
+                else [v[0]] * (end_idx - start_idx)
+                for k, v in model_parameters.items()
+            }
 
             slice.update_parameters(new_params, global_parameters)
